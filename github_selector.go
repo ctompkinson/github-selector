@@ -2,30 +2,112 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
-	"github.com/google/go-github/github"
-	"github.com/pkg/errors"
-	"golang.org/x/oauth2"
-	"gopkg.in/mattes/go-expand-tilde.v1"
-	"gopkg.in/yaml.v2"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
 	"os/user"
 	"strings"
+
+	"github.com/google/go-github/github"
+	"github.com/pkg/errors"
+	"golang.org/x/oauth2"
+	"gopkg.in/mattes/go-expand-tilde.v1"
+	"gopkg.in/src-d/go-git.v4"
+	"log"
 )
 
-type Config struct {
+type GithubSelector struct {
 	GithubToken string
 	CloneDir    string
 	OrgName     string
 }
 
-func withFilter(command string, input func(in io.WriteCloser)) []string {
+const configDir = ".config/github_selector"
+const cacheFile = "cache.json"
+const configFile = "config.json"
+
+var homeDir string
+
+func main() {
+	refresh := flag.Bool("refresh",false, "will refresh the list of github packages")
+	function := flag.Bool("function", false, "print a bash function used to setup")
+	flag.Parse()
+
+	if *function {
+		fmt.Println("gs() { cd $($GOPATH/bin/github_selector) }")
+		os.Exit(0)
+	}
+
+	g := GithubSelector{}
+	g.Run(*refresh)
+}
+
+func (g *GithubSelector) Run(refresh bool) {
+	// Just initialize the config, this asks the user for config input
+	// or reads from disk
+	g.createOrLoadConfig()
+
+	// If we refresh, load github repositories
+	// else read the local cache and use that as the repository list
+	var repos []github.Repository
+
+	_, err := os.Stat(buildCachePath())
+	if os.IsNotExist(err) || refresh {
+		ptrRepos := g.listOrgRepos(g.OrgName, g.GithubToken)
+		for _, r := range ptrRepos {
+			repos = append(repos, *r)
+		}
+		g.writeRepoCache(repos)
+	} else {
+		repos = g.readRepoCache()
+	}
+
+	// spawn fzf and then allow the user to pick which repository they want
+	filtered := g.withFilter("fzf -m", func(in io.WriteCloser) {
+		for _, repo := range repos {
+			fmt.Fprintln(in, *repo.FullName)
+		}
+	})
+
+	// take the output from fzf and then use that to pick the repository from our repo list
+	var selectedRepo github.Repository
+	for _, repo := range repos {
+		if *repo.FullName == filtered[0] {
+			selectedRepo = repo
+		}
+	}
+
+	// clone the repository
+	g.cloneRepo(selectedRepo)
+
+	// write out the repository name so that it can be used to cd by an external function
+	fmt.Printf("%s/%s\n", g.CloneDir, *selectedRepo.Name)
+}
+
+func (g *GithubSelector) cloneRepo(repo github.Repository) {
+	basePath := g.CloneDir
+	repoPath := basePath + "/" + *repo.Name
+
+	_, err := git.PlainClone(repoPath, false, &git.CloneOptions{
+		URL:      fmt.Sprintf("git@github.com:%s.git", *repo.FullName),
+		Progress: os.Stderr,
+	})
+
+	if err == git.ErrRepositoryAlreadyExists {
+		return
+	}
+
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (g *GithubSelector) withFilter(command string, input func(in io.WriteCloser)) []string {
 	shell := os.Getenv("SHELL")
 	if len(shell) == 0 {
 		shell = "sh"
@@ -41,7 +123,7 @@ func withFilter(command string, input func(in io.WriteCloser)) []string {
 	return strings.Split(string(result), "\n")
 }
 
-func listOrgRepos(organizationName string, githubToken string) []*github.Repository {
+func (g *GithubSelector) listOrgRepos(organizationName string, githubToken string) []*github.Repository {
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: githubToken},
@@ -70,122 +152,138 @@ func listOrgRepos(organizationName string, githubToken string) []*github.Reposit
 	return allRepos
 }
 
-func createOrLoadConfig() (Config, error) {
-	usr, err := user.Current()
-	if err != nil {
-		log.Fatal(err)
-	}
+/*
+ * Config
+ */
 
-	configDir := fmt.Sprintf("%s/.config/github_selector", usr.HomeDir)
-	configFile := fmt.Sprintf("%s/config.yaml", configDir)
+func (g *GithubSelector) createOrLoadConfig() error {
+	configPath := buildConfigPath()
 
 	// Ensure directory exists
-	if _, err := os.Stat(configDir); os.IsNotExist(err) {
-		os.MkdirAll(configDir, 0755)
+	if _, err := os.Stat(buildConfigDirPath()); os.IsNotExist(err) {
+		os.MkdirAll(buildConfigDirPath(), 0755)
 	}
 
 	// Ensure config exists and if not write the defaults and return them
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		config := promptUserForConfig()
-		b, err := yaml.Marshal(config)
+	if _, err := os.Stat(buildConfigPath()); os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, "no config found, creating new config...")
+
+		g.promptUserForConfig()
+		data, err := json.Marshal(g)
 		if err != nil {
-			return Config{}, errors.Wrap(err, "unable to create default config")
+			return errors.Wrap(err, "unable to create config")
 		}
 
-		err = ioutil.WriteFile(configFile, b, 0644)
+		fmt.Println(configPath)
+		fmt.Println(string(data))
+		err = ioutil.WriteFile(configPath, data, 0644)
 		if err != nil {
-			return Config{}, errors.Wrap(err, "unable to write default config")
+			return errors.Wrap(err, "unable to write default config")
 		}
 
-		return config, nil
+		return nil
 	}
 
-	return loadConfig(configFile)
+	return g.loadConfig(buildConfigPath())
 }
 
-func promptUserForConfig() Config {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Whats your github access token? : ")
-	githubToken, _ := reader.ReadString('\n')
+func (g *GithubSelector) promptUserForConfig() {
+	var err error
 
-	reader = bufio.NewReader(os.Stdin)
-	fmt.Print("Whats your git clone directory? : ")
-	rawCloneDir, _ := reader.ReadString('\n')
-	cloneDir, _ := tilde.Expand(rawCloneDir)
+	g.GithubToken, err = readString("Whats your github access token?")
 
-	reader = bufio.NewReader(os.Stdin)
-	fmt.Print("What organization do you want to search? : ")
-	orgName, _ := reader.ReadString('\n')
+	rawCloneDir, err := readString("Whats your git clone directory?")
+	g.CloneDir, err = tilde.Expand(rawCloneDir)
 
-	return Config{
-		GithubToken: strings.TrimSpace(githubToken),
-		CloneDir:    strings.TrimSpace(cloneDir),
-		OrgName:     strings.TrimSpace(orgName),
+	g.OrgName, err = readString("What organization do you want to search?")
+
+	if err != nil {
+		panic("Failed to parse config")
 	}
 }
 
-func loadConfig(path string) (Config, error) {
+func (g *GithubSelector) loadConfig(path string) error {
 	b, err := ioutil.ReadFile(path)
 	if err != nil {
-		return Config{}, errors.Wrap(err, "unable to load config")
+		return errors.Wrap(err, "unable to load config")
 	}
 
-	var config Config
-	err = yaml.Unmarshal(b, &config)
+	var config GithubSelector
+	err = json.Unmarshal(b, &config)
 	if err != nil {
-		return Config{}, errors.Wrap(err, "unable to unmarshal config")
+		return errors.Wrap(err, "unable to unmarshal config")
 	}
+	*g = config
 
-	return config, nil
+	return nil
 }
 
-func main() {
-	config, _ := createOrLoadConfig()
-	repos := listOrgRepos(config.OrgName, config.GithubToken)
+/*
+ * Cache Management
+ */
 
-	filtered := withFilter("fzf -m", func(in io.WriteCloser) {
-		for _, repo := range repos {
-			fmt.Fprintln(in, *repo.FullName)
-		}
-	})
-
-	var selectedRepo *github.Repository
-	for _, repo := range repos {
-		if *repo.FullName == filtered[0] {
-			selectedRepo = repo
-		}
-	}
-
-	basePath := config.CloneDir
-	repoPath := basePath + "/" + *selectedRepo.Name
-
-	args := []string{"clone", "git@github.com:" + *selectedRepo.FullName + ".git", repoPath}
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd := exec.Command("git", args...)
-
-	stdoutIn, _ := cmd.StdoutPipe()
-	stderrIn, _ := cmd.StderrPipe()
-
-	var errStdout, errStderr error
-	stdout := io.MultiWriter(os.Stderr, &stdoutBuf)
-	stderr := io.MultiWriter(os.Stderr, &stderrBuf)
-	err := cmd.Start()
+func (g *GithubSelector) writeRepoCache(repos []github.Repository) error {
+	jsonRepos, err := json.Marshal(repos)
 	if err != nil {
-		log.Fatalf("cmd.Start() failed with '%s'\n", err)
+		return errors.Wrap(err, "unable to marshall repo JSON")
 	}
 
-	go func() {
-		_, errStdout = io.Copy(stdout, stdoutIn)
-	}()
-
-	go func() {
-		_, errStderr = io.Copy(stderr, stderrIn)
-	}()
-
-	err = cmd.Wait()
+	err = ioutil.WriteFile(buildCachePath(), jsonRepos, 0644)
 	if err != nil {
-		log.Fatalf("git clone failed with %s\n", err)
+		return errors.Wrap(err, "Unable to write cache to disk")
 	}
 
-	fmt.Println(repoPath)
+	return nil
 }
+
+func (g *GithubSelector) readRepoCache() ([]github.Repository) {
+	jsonRepos, err := ioutil.ReadFile(buildCachePath())
+	if err != nil {
+		panic(errors.Wrap(err, "Unable to read cache"))
+	}
+
+	var repos []github.Repository
+	err = json.Unmarshal(jsonRepos, &repos)
+	if err != nil {
+		panic(errors.Wrap(err, "Unable to read cache"))
+	}
+
+	return repos
+}
+
+/*
+ * Helpers
+ */
+
+func readString(message string) (string, error) {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Fprintf(os.Stderr, "%s : ", message)
+	in, err := reader.ReadString('\n')
+	return strings.TrimSpace(in), err
+}
+
+func getHomeDir() string {
+	if homeDir != "" {
+		return homeDir
+	}
+
+	usr, err := user.Current()
+	if err != nil {
+		panic(err)
+	}
+
+	return usr.HomeDir
+}
+
+func buildConfigDirPath() string {
+	return fmt.Sprintf("%s/%s", getHomeDir(), configDir)
+}
+
+func buildConfigPath() string {
+	return fmt.Sprintf("%s/%s/%s", getHomeDir(), configDir, configFile)
+}
+
+func buildCachePath() string {
+	return fmt.Sprintf("%s/%s/%s", getHomeDir(), configDir, cacheFile)
+}
+
