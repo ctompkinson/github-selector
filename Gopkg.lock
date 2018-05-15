@@ -2,6 +2,12 @@
 
 
 [[projects]]
+  name = "github.com/emirpasic/gods"
+  packages = ["containers","lists","lists/arraylist","trees","trees/binaryheap","utils"]
+  revision = "f6c17b524822278a87e3b3bd809fec33b51f5b46"
+  version = "v1.9.0"
+
+[[projects]]
   name = "github.com/golang/protobuf"
   packages = ["proto"]
   revision = "925541529c1fa6821df4e44ce2723319eb2be768"
@@ -118,8 +124,8 @@
 [[projects]]
   name = "gopkg.in/src-d/go-git.v4"
   packages = [".","config","internal/revision","plumbing","plumbing/cache","plumbing/filemode","plumbing/format/config","plumbing/format/diff","plumbing/format/gitignore","plumbing/format/idxfile","plumbing/format/index","plumbing/format/objfile","plumbing/format/packfile","plumbing/format/pktline","plumbing/object","plumbing/protocol/packp","plumbing/protocol/packp/capability","plumbing/protocol/packp/sideband","plumbing/revlist","plumbing/storer","plumbing/transport","plumbing/transport/client","plumbing/transport/file","plumbing/transport/git","plumbing/transport/http","plumbing/transport/internal/common","plumbing/transport/server","plumbing/transport/ssh","storage","storage/filesystem","storage/filesystem/internal/dotgit","storage/memory","utils/binary","utils/diff","utils/ioutil","utils/merkletrie","utils/merkletrie/filesystem","utils/merkletrie/index","utils/merkletrie/internal/frame","utils/merkletrie/noder"]
-  revision = "e9247ce9c5ce12126f646ca3ddf0066e4829bd14"
-  version = "v4.1.0"
+  revision = "b30763cb64afa91c016b23e905af0a378eb1b76d"
+  version = "v4.3.1"
 
 [[projects]]
   name = "gopkg.in/warnings.v0"
@@ -130,6 +136,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "1851a609faf53326a4d895f9497b1b3d3e16a6cc4d5eba0341d24702b0c5f8ee"
+  inputs-digest = "d1de2538604edcb5a2e20c7a12442ada6d69728c24cb45905a32bb3ffcc5a94a"
   solver-name = "gps-cdcl"
   solver-version = 1

@@ -89,14 +89,15 @@ func (g *GithubSelector) Run(refresh bool) {
 	fmt.Printf("%s/%s\n", g.CloneDir, *selectedRepo.Name)
 }
 
-func (g *GithubSelector) cloneRepo(repo github.Repository) {
+func (g *GithubSelector) cloneRepo(githubRepo github.Repository) {
 	basePath := g.CloneDir
-	repoPath := basePath + "/" + *repo.Name
+	repoPath := basePath + "/" + *githubRepo.Name
 
-	_, err := git.PlainClone(repoPath, false, &git.CloneOptions{
-		URL:      fmt.Sprintf("git@github.com:%s.git", *repo.FullName),
+	repo, err := git.PlainClone(repoPath, false, &git.CloneOptions{
+		URL:      fmt.Sprintf("git@github.com:%s.git", *githubRepo.FullName),
 		Progress: os.Stderr,
 	})
+
 
 	if err == git.ErrRepositoryAlreadyExists {
 		return
@@ -105,6 +106,15 @@ func (g *GithubSelector) cloneRepo(repo github.Repository) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+
+	config, err := repo.Config()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defaultBranch := githubRepo.GetDefaultBranch()
+	config.Branches[defaultBranch].Remote = "origin"
 }
 
 func (g *GithubSelector) withFilter(command string, input func(in io.WriteCloser)) []string {
