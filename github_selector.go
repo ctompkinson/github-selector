@@ -24,7 +24,8 @@ import (
 type GithubSelector struct {
 	GithubToken string
 	CloneDir    string
-	OrgName     string
+	OrgNames    []string
+	UserNames   []string
 }
 
 const configDir = ".config/github_selector"
@@ -58,9 +59,18 @@ func (g *GithubSelector) Run(refresh bool) {
 
 	_, err := os.Stat(buildCachePath())
 	if os.IsNotExist(err) || refresh {
-		ptrRepos := g.listOrgRepos(g.OrgName, g.GithubToken)
-		for _, r := range ptrRepos {
-			repos = append(repos, *r)
+		for _, orgName := range g.OrgNames {
+			ptrRepos := g.listOrgRepos(orgName, g.GithubToken)
+			for _, r := range ptrRepos {
+				repos = append(repos, *r)
+			}
+		}
+
+		for _, userName := range g.UserNames {
+			ptrRepos := g.listUserRepos(userName, g.GithubToken)
+			for _, r := range ptrRepos {
+				repos = append(repos, *r)
+			}
 		}
 		g.writeRepoCache(repos)
 	} else {
@@ -162,6 +172,37 @@ func (g *GithubSelector) listOrgRepos(organizationName string, githubToken strin
 	return allRepos
 }
 
+func (g *GithubSelector) listUserRepos(userName string, githubToken string) []*github.Repository {
+	ctx := context.Background()
+	ts := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: githubToken},
+	)
+	tc := oauth2.NewClient(ctx, ts)
+
+	client := github.NewClient(tc)
+	opt := &github.RepositoryListOptions{
+		ListOptions: github.ListOptions{
+			PerPage: 1000,
+		},
+	}
+
+	// get all pages of results
+	var allRepos []*github.Repository
+	for {
+		repos, resp, err := client.Repositories.List(ctx, userName, opt)
+		if err != nil {
+			fmt.Println(err)
+		}
+		allRepos = append(allRepos, repos...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+
+	return allRepos
+}
+
 /*
  * Config
  */
@@ -184,8 +225,6 @@ func (g *GithubSelector) createOrLoadConfig() error {
 			return errors.Wrap(err, "unable to create config")
 		}
 
-		fmt.Println(configPath)
-		fmt.Println(string(data))
 		err = ioutil.WriteFile(configPath, data, 0644)
 		if err != nil {
 			return errors.Wrap(err, "unable to write default config")
@@ -205,11 +244,26 @@ func (g *GithubSelector) promptUserForConfig() {
 	rawCloneDir, err := readString("Whats your git clone directory?")
 	g.CloneDir, err = tilde.Expand(rawCloneDir)
 
-	g.OrgName, err = readString("What organization do you want to search?")
-
+	orgNames, err := readString("What organizations do you want to search? (comma separated)")
 	if err != nil {
-		panic("Failed to parse config")
+		panic("Failed to parse input")
 	}
+	orgs := strings.Split(orgNames, ",")
+	for _, org := range orgs {
+		org = strings.TrimSpace(org)
+	}
+
+	userNames, err := readString("What user names do you want to search? (comma separated)")
+	if err != nil {
+		panic("Failed to parse input")
+	}
+	users := strings.Split(userNames, ",")
+	for _, u := range users {
+		u = strings.TrimSpace(u)
+	}
+
+	g.OrgNames = orgs
+	g.UserNames = users
 }
 
 func (g *GithubSelector) loadConfig(path string) error {
